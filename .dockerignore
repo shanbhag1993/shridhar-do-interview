@@ -14,3 +14,4 @@ Makefile
 docker-compose.yml
 .dockerignore
 README.md
+src/**/*.md
