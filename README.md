@@ -1,106 +1,79 @@
-# REST API with Message Queue Backend
+# In-Memory Job Queue
 
-In-memory asynchronous job processing service: a FastAPI REST API, a bounded
-`asyncio.Queue`, and a pool of worker coroutines, all in one process and one
-container. Design: [`docs/design.md`](docs/design.md).
+FastAPI REST API, bounded `asyncio.Queue`, and a worker pool — one process, one container.
 
-## Run in Docker
+## Topology
 
-```bash
-docker compose up --build        # serves http://localhost:8000
+```mermaid
+flowchart TB
+    Clients(["HTTP Clients"])
+
+    subgraph DO ["DigitalOcean · blr1"]
+        LB["Load Balancer<br/>job-queue-lb<br/>152.42.157.49 :80"]
+        FW["Cloud Firewall<br/>job-queue-fw<br/>allow TCP 22, 8000"]
+
+        subgraph VPC ["VPC job-queue-vpc · 10.20.0.0/20"]
+            Droplet["Droplet job-queue-1<br/>public 168.144.210.142<br/>private 10.20.0.2"]
+            Container["Docker container<br/>job-queue :8000"]
+            Droplet --- Container
+        end
+
+        DOCR[("DOCR<br/>shridhar-job-queue/job-queue")]
+    end
+
+    Clients -->|"HTTP :80"| LB
+    LB -->|"forward → :8000<br/>health GET /v1/health"| FW
+    FW --> Droplet
+    DOCR -.->|"docker pull on deploy"| Container
+    Clients -.->|"SSH :22"| FW
 ```
 
-Or run the image from the registry:
+## Application design
 
-```bash
-docker run -d --name job-queue --restart unless-stopped --stop-timeout 40 \
-  -p 8000:8000 -e QUEUE_CAPACITY=10000 -e NUM_WORKERS=16 \
-  registry.digitalocean.com/shridhar-job-queue/job-queue:latest
+```mermaid
+flowchart TD
+    Client(["HTTP Client"])
+
+    subgraph API ["HTTP REST API"]
+        Router["Router"]
+        Validator["Validate + mint task_id"]
+        Status["Status / Cancel handlers"]
+    end
+
+    subgraph State ["In-memory state"]
+        Q[("asyncio.Queue<br/>bounded FIFO")]
+        Store[("Task store<br/>dict + Lock + TTL")]
+    end
+
+    subgraph Workers ["Worker pool"]
+        W1["Worker 1"]
+        W2["Worker 2"]
+        WN["Worker N"]
+        Cleaner["TTL cleaner"]
+    end
+
+    Client -->|"POST /v1/tasks"| Router --> Validator
+    Validator -->|"QUEUED"| Store
+    Validator -->|"put_nowait"| Q
+    Validator -->|"202 + task_id"| Client
+
+    Client -->|"GET/DELETE /v1/tasks/{id}"| Status
+    Status --> Store
+
+    Q --> W1 & W2 & WN
+    W1 & W2 & WN -->|"RUNNING → COMPLETED/FAILED"| Store
+    Cleaner -->|"evict terminal after TTL"| Store
 ```
 
-Keep the stop timeout above `DRAIN_TIMEOUT_SECONDS`. Docker's default is 10
-seconds, after which it kills the container while it is still draining.
-
-Run only one instance. The queue and task store live in process memory, so a
-restart drops queued and running tasks, and a second replica would not share state.
-
-## API
-
-| Method | Path | Result |
-| :--- | :--- | :--- |
-| `POST` | `/v1/tasks` | `202` with `task_id`; `400` invalid body or unknown `task_type`; `429` queue full; `503` shutting down |
-| `GET` | `/v1/tasks/{id}` | `200` status, timings, result or error; `404` |
-| `DELETE` | `/v1/tasks/{id}` | `200` cancelled; `409` if not `QUEUED`; `404` |
-| `GET` | `/v1/health` | `200` queue and worker metrics; `503` shutting down |
-
-```bash
-curl -X POST localhost:8000/v1/tasks -H 'content-type: application/json' \
-  -d '{"task_type":"DATA_AGGREGATION","payload":{"dataset_id":"ds-9982"},"max_retries":3}'
-curl localhost:8000/v1/tasks/<task_id>
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED: POST /v1/tasks
+    QUEUED --> RUNNING: worker claims
+    RUNNING --> COMPLETED: success
+    RUNNING --> QUEUED: retry + backoff
+    RUNNING --> FAILED: timeout / retries exhausted
+    QUEUED --> CANCELLED: DELETE while QUEUED
+    COMPLETED --> [*]: TTL eviction
+    FAILED --> [*]: TTL eviction
+    CANCELLED --> [*]: TTL eviction
 ```
-
-`DATA_AGGREGATION` is the only registered task type and its handler is a
-simulation. Add real work in `src/job_queue/services/handlers.py`.
-
-## Configuration
-
-| Variable | Default | Meaning |
-| :--- | :--- | :--- |
-| `PORT` | `8000` | Listen port |
-| `QUEUE_CAPACITY` | `10000` | Max queued tasks before `429` |
-| `NUM_WORKERS` | `16` | Concurrent worker coroutines |
-| `RETENTION_TTL_SECONDS` | `3600` | How long finished tasks stay queryable (`RETENTION_TTL` also accepted) |
-| `CLEANER_INTERVAL_SECONDS` | `60` | How often finished tasks are swept |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Grace period for queued work on `SIGTERM` |
-| `RETRY_BACKOFF_BASE_SECONDS` | `0.5` | Base of the exponential retry backoff |
-| `RETRY_BACKOFF_MAX_SECONDS` | `30` | Backoff ceiling |
-| `RETRY_AFTER_SECONDS` | `3` | Retry hint returned with `429` |
-| `LOG_LEVEL` | `INFO` | Log level |
-
-## Build, test, and release
-
-Everything goes through `make`. Run `make help` for the full list.
-
-| Command | What it does |
-| :--- | :--- |
-| `make venv` | Create the project virtualenv `.venv` and install dependencies |
-| `make compile` | Byte-compile `src` and `tests`; fails on a syntax error |
-| `make test` | Run the unit tests |
-| `make run` | Run the service locally on port 8000 |
-| `make build` | Build the `linux/amd64` image, tagged with the git SHA and `latest` |
-| `make smoke` | Build, then run the end-to-end smoke test against the image |
-| `make push` | Build, log in to the registry, and push both tags |
-| `make release` | `compile`, `test`, `smoke`, then `push`; stops at the first failure |
-| `make clean` | Remove `.venv` and caches |
-
-### Virtualenv
-
-`make venv` needs Python 3.11+ to create `.venv`. If your `python3` is older,
-point it at a newer one once: `make venv PYTHON=/path/to/python3.12`.
-
-Every `make` target uses `.venv` automatically. For commands you type yourself,
-activate it once per terminal:
-
-```bash
-source .venv/bin/activate
-pytest -k cancel
-```
-
-### Registry
-
-Images go to `registry.digitalocean.com/shridhar-job-queue/job-queue`.
-
-```bash
-make release
-```
-
-- **Login:** `make push` and `make release` log in on their own. The first
-  time on a machine, set `DIGITALOCEAN_TOKEN` to an API token with registry
-  write access. Docker saves that login, so later runs need no token.
-
-- **Tags:** each push sets `<git-short-sha>` and `latest`. The SHA tag gets a
-  `-dirty` suffix when built from uncommitted changes, so commit first for a
-  tag you can roll back to.
-- **Platform:** the image is built for `linux/amd64` to match the Droplet,
-  whatever machine builds it.
-- **Overrides:** `make push REGISTRY=<host>/<name> TAG=<tag>`.
