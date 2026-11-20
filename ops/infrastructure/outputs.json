@@ -1,0 +1,67 @@
+{
+  "app_port": {
+    "sensitive": false,
+    "type": "number",
+    "value": 8000
+  },
+  "droplet_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "621576394"
+  },
+  "droplet_ipv4": {
+    "sensitive": false,
+    "type": "string",
+    "value": "168.144.210.142"
+  },
+  "droplet_ipv4_private": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.20.0.2"
+  },
+  "droplet_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "job-queue-1"
+  },
+  "firewall_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "0c9a7688-1180-4cba-aebb-71ac327a303e"
+  },
+  "lb_health_url": {
+    "sensitive": false,
+    "type": "string",
+    "value": "http://152.42.157.49/v1/health"
+  },
+  "loadbalancer_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "f8490fd4-0fbb-46f0-8bff-88cd32867a2f"
+  },
+  "loadbalancer_ip": {
+    "sensitive": false,
+    "type": "string",
+    "value": "152.42.157.49"
+  },
+  "region": {
+    "sensitive": false,
+    "type": "string",
+    "value": "blr1"
+  },
+  "ssh_command": {
+    "sensitive": false,
+    "type": "string",
+    "value": "ssh root@168.144.210.142"
+  },
+  "vpc_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "4c5cde40-ec71-4d00-8cfe-35c3fd66ed30"
+  },
+  "vpc_ip_range": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.20.0.0/20"
+  }
+}
