@@ -19,7 +19,16 @@ Applied via `ops/iac` on 2026-11-20.
 
 ```bash
 ssh root@168.144.210.142
-curl -sS http://152.42.157.49/v1/health   # expected fail until app deploy
+curl -sS http://152.42.157.49/v1/health
 ```
+
+## Application (Part 2)
+
+| Item | Value |
+| :--- | :--- |
+| Image | `registry.digitalocean.com/shridhar-job-queue/job-queue:latest` |
+| Host path | `/opt/job-queue` (Compose) |
+| Deploy | `ops/app/deploy.sh` |
+| Status | Running — LB health + smoke task OK (2026-11-20) |
 
 Console: https://cloud.digitalocean.com/droplets/621576394

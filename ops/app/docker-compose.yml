@@ -1,0 +1,18 @@
+# Runtime on the Droplet. One replica only (in-memory queue).
+services:
+  job-queue:
+    image: registry.digitalocean.com/shridhar-job-queue/job-queue:${TAG:-latest}
+    container_name: job-queue
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      QUEUE_CAPACITY: "${QUEUE_CAPACITY:-10000}"
+      NUM_WORKERS: "${NUM_WORKERS:-16}"
+      RETENTION_TTL_SECONDS: "${RETENTION_TTL_SECONDS:-3600}"
+      CLEANER_INTERVAL_SECONDS: "${CLEANER_INTERVAL_SECONDS:-60}"
+      DRAIN_TIMEOUT_SECONDS: "${DRAIN_TIMEOUT_SECONDS:-30}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    # Must exceed DRAIN_TIMEOUT_SECONDS so SIGTERM can finish draining.
+    stop_grace_period: 40s
