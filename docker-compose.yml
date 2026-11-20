@@ -1,0 +1,17 @@
+services:
+  job-queue:
+    build: .
+    image: job-queue:latest
+    container_name: job-queue
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      QUEUE_CAPACITY: "10000"
+      NUM_WORKERS: "16"
+      RETENTION_TTL_SECONDS: "3600"
+      DRAIN_TIMEOUT_SECONDS: "30"
+    # Must exceed DRAIN_TIMEOUT_SECONDS, or Docker sends SIGKILL mid-drain
+    # (the default grace period is 10s).
+    stop_grace_period: 40s
