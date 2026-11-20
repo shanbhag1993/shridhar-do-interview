@@ -69,9 +69,18 @@ build: ## Build the image, tagged with the git SHA and latest
 smoke: build ## Run the end-to-end smoke test against the built image
 	SMOKE_PLATFORM=$(PLATFORM) ops/scripts/smoke-test.sh $(IMAGE):$(TAG)
 
-login: ## Log Docker in to the registry using DIGITALOCEAN_TOKEN
-	@[ -n "$$DIGITALOCEAN_TOKEN" ] || { echo "DIGITALOCEAN_TOKEN is not set. Export a DigitalOcean API token with registry write access."; exit 1; }
-	@printf '%s' "$$DIGITALOCEAN_TOKEN" | docker login $(REGISTRY_HOST) --username "$$DIGITALOCEAN_TOKEN" --password-stdin
+# Docker keeps a successful login in its credential store (the macOS keychain),
+# so the token is only needed the first time on a machine, or after it changes.
+login: ## Log Docker in to the registry (saved login, or DIGITALOCEAN_TOKEN)
+	@if [ -n "$$DIGITALOCEAN_TOKEN" ]; then \
+		printf '%s' "$$DIGITALOCEAN_TOKEN" | docker login $(REGISTRY_HOST) --username "$$DIGITALOCEAN_TOKEN" --password-stdin; \
+	elif docker login $(REGISTRY_HOST) </dev/null >/dev/null 2>&1; then \
+		echo "Using Docker's saved login for $(REGISTRY_HOST)"; \
+	else \
+		echo "Not logged in to $(REGISTRY_HOST)."; \
+		echo "Set DIGITALOCEAN_TOKEN to an API token with registry write access and run this again."; \
+		exit 1; \
+	fi
 
 push: build login ## Build the image, log in, and push both tags to the registry
 	docker push $(IMAGE):$(TAG)

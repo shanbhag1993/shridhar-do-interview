@@ -91,9 +91,12 @@ pytest -k cancel
 Images go to `registry.digitalocean.com/shridhar-job-queue/job-queue`.
 
 ```bash
-export DIGITALOCEAN_TOKEN=...   # API token with registry write access
 make release
 ```
+
+- **Login:** `make push` and `make release` log in on their own. The first
+  time on a machine, set `DIGITALOCEAN_TOKEN` to an API token with registry
+  write access. Docker saves that login, so later runs need no token.
 
 - **Tags:** each push sets `<git-short-sha>` and `latest`. The SHA tag gets a
   `-dirty` suffix when built from uncommitted changes, so commit first for a
