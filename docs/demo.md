@@ -1,241 +1,194 @@
 # Demo: In-Memory Job Queue
 
-Live walkthrough of **topology**, **application design**, and **working REST calls**.
+## Topology
 
-| | |
-| :--- | :--- |
-| Public entry (LB) | `http://152.42.157.49` |
-| Droplet (SSH / direct) | `168.144.210.142` |
-| App port | `8000` |
-| Region | `blr1` |
-| Image | `registry.digitalocean.com/shridhar-job-queue/job-queue` |
-
-```bash
-export BASE=http://152.42.157.49
-# Local:   export BASE=http://localhost:8000
-# Direct:  export BASE=http://168.144.210.142:8000
-
-./ops/scripts/demo-api.sh    # full API showcase (no task-id copying)
-```
-
----
-
-## 1. Cloud topology
-
-Infrastructure is Terraform-owned (`ops/iac`). One Droplet runs **one** container — the in-memory queue cannot be shared across replicas.
+One Droplet, one container (in-memory queue cannot be shared). Public entry is the load balancer.
 
 ```mermaid
 flowchart TB
     Clients(["HTTP Clients"])
 
     subgraph DO ["DigitalOcean · blr1"]
-        LB["Load Balancer<br/>job-queue-lb<br/>152.42.157.49 :80"]
-        FW["Cloud Firewall<br/>job-queue-fw<br/>allow TCP 22, 8000"]
+        LB["Load Balancer<br/>152.42.157.49 :80"]
+        FW["Firewall · TCP 22, 8000"]
 
-        subgraph VPC ["VPC job-queue-vpc · 10.20.0.0/20"]
-            Droplet["Droplet job-queue-1<br/>public 168.144.210.142<br/>private 10.20.0.2"]
-            Container["Docker container<br/>job-queue :8000"]
+        subgraph VPC ["VPC 10.20.0.0/20"]
+            Droplet["Droplet job-queue-1<br/>168.144.210.142"]
+            Container["container :8000"]
             Droplet --- Container
         end
-
-        DOCR[("DOCR<br/>shridhar-job-queue/job-queue")]
     end
 
     Clients -->|"HTTP :80"| LB
-    LB -->|"forward → :8000<br/>health GET /v1/health"| FW
-    FW --> Droplet
-    DOCR -.->|"docker pull on deploy"| Container
-    Clients -.->|"SSH :22"| FW
+    LB -->|"→ :8000 · health /v1/health"| FW --> Droplet
 ```
 
-### Request path
+### What each topology piece is
 
-```text
-Client
-  → LB 152.42.157.49:80
-  → Firewall (TCP 8000)
-  → Droplet host :8000
-  → container job-queue :8000
-  → FastAPI (in-process queue + workers)
-```
-
-| Resource | Value |
+| Component | What it is |
 | :--- | :--- |
-| VPC | `job-queue-vpc` (`10.20.0.0/20`) |
-| Firewall | inbound `22`, `8000` |
-| LB → target | HTTP `80` → Droplet `8000` |
-| LB health | `GET /v1/health` every 10s |
-| Runtime | single Compose service, `restart: unless-stopped` |
+| **Clients** | Anything calling the HTTP API (curl, browser, another service). |
+| **Load Balancer** | Public front door (`152.42.157.49`). Accepts HTTP on port 80 and forwards to the Droplet on port 8000. Also probes `GET /v1/health` so a dead backend is taken out of rotation. |
+| **Firewall** | DigitalOcean cloud firewall on the Droplet. Allows SSH (`22`) and the app port (`8000`); blocks other inbound traffic. |
+| **VPC** | Private network (`10.20.0.0/20`) that the Droplet (and LB) sit in. |
+| **Droplet** | The VM (`job-queue-1`) running Ubuntu + Docker. Hosts exactly one app container. |
+| **Container** | The running job-queue image. All API, queue, workers, and task store live **inside this one process**. |
 
-**Why one replica:** queue and task store live in process memory. A second instance would not share state; a restart drops in-flight work.
+| | |
+| :--- | :--- |
+| LB | `http://152.42.157.49` |
+| Droplet | `168.144.210.142` |
+| Image | `registry.digitalocean.com/shridhar-job-queue/job-queue` |
 
 ---
 
-## 2. Application design
+## Application design
 
 Everything below runs **inside** the single container on one asyncio event loop.
 
 ```mermaid
 flowchart TD
-    Client(["HTTP Client"])
+    Client(["Client"])
+    API["REST API"]
+    Q[("Bounded asyncio.Queue")]
+    Store[("Task store + TTL")]
+    Workers["Worker pool"]
 
-    subgraph API ["HTTP REST API"]
-        Router["Router"]
-        Validator["Validate + mint task_id"]
-        Status["Status / Cancel handlers"]
-    end
-
-    subgraph State ["In-memory state"]
-        Q[("asyncio.Queue<br/>bounded FIFO")]
-        Store[("Task store<br/>dict + Lock + TTL")]
-    end
-
-    subgraph Workers ["Worker pool"]
-        W1["Worker 1"]
-        W2["Worker 2"]
-        WN["Worker N"]
-        Cleaner["TTL cleaner"]
-    end
-
-    Client -->|"POST /v1/tasks"| Router --> Validator
-    Validator -->|"QUEUED"| Store
-    Validator -->|"put_nowait"| Q
-    Validator -->|"202 + task_id"| Client
-
-    Client -->|"GET/DELETE /v1/tasks/{id}"| Status
-    Status --> Store
-
-    Q --> W1 & W2 & WN
-    W1 & W2 & WN -->|"RUNNING → COMPLETED/FAILED"| Store
-    Cleaner -->|"evict terminal after TTL"| Store
+    Client -->|"POST /v1/tasks → 202"| API
+    API --> Q & Store
+    Client -->|"GET/DELETE /v1/tasks/{id}"| API --> Store
+    Q --> Workers --> Store
 ```
 
-### Task lifecycle
+### What each application piece is
+
+| Component | What it is |
+| :--- | :--- |
+| **REST API** | FastAPI endpoints. Accepts work (`POST /v1/tasks`), returns status (`GET`), cancels queued work (`DELETE`), and exposes health (`GET /v1/health`). Submit returns `202` immediately — it does **not** wait for the job to finish. |
+| **Bounded asyncio.Queue** | In-memory FIFO buffer between the API and workers. Capacity is fixed (e.g. 10000 in prod). When full, new submits are rejected with `429` (backpressure) instead of growing memory forever. |
+| **Task store** | In-memory `dict` of `task_id → Task`, protected by a lock. Holds status, timestamps, result, and error for every known task. This is what `GET /v1/tasks/{id}` reads. It is **not** a database — restart loses it. |
+| **TTL cleaner** | Background loop that deletes finished tasks (`COMPLETED` / `FAILED` / `CANCELLED`) after a retention window (default 1 hour) so the store cannot grow without bound. |
+| **Worker pool** | Several asyncio coroutines that `await queue.get()`, mark the task `RUNNING`, run the handler (with timeout / retries), then write `COMPLETED` or `FAILED` back to the store. |
 
 ```mermaid
 stateDiagram-v2
-    [*] --> QUEUED: POST /v1/tasks
+    [*] --> QUEUED: POST
     QUEUED --> RUNNING: worker claims
-    RUNNING --> COMPLETED: success
-    RUNNING --> QUEUED: retry + backoff
-    RUNNING --> FAILED: timeout / retries exhausted
-    QUEUED --> CANCELLED: DELETE while QUEUED
-    COMPLETED --> [*]: TTL eviction
-    FAILED --> [*]: TTL eviction
-    CANCELLED --> [*]: TTL eviction
+    RUNNING --> COMPLETED: ok
+    RUNNING --> QUEUED: retry
+    RUNNING --> FAILED: exhausted / timeout
+    QUEUED --> CANCELLED: DELETE
+    COMPLETED --> [*]: TTL
+    FAILED --> [*]: TTL
+    CANCELLED --> [*]: TTL
 ```
 
-### API surface
+### What each status means
 
-| Method | Path | Success | Typical errors |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/v1/tasks` | `202` | `400`, `429`, `503` |
-| `GET` | `/v1/tasks/{id}` | `200` | `404` |
-| `DELETE` | `/v1/tasks/{id}` | `200` | `404`, `409` |
-| `GET` | `/v1/health` | `200` | `503` (draining) |
-
-Only registered type today: `DATA_AGGREGATION` (simulated ~200ms handler).
+| Status | Meaning |
+| :--- | :--- |
+| **QUEUED** | Accepted and waiting in the queue (or waiting to retry). |
+| **RUNNING** | A worker has claimed it and is executing the handler. |
+| **COMPLETED** | Finished successfully; `result` is in the task store. |
+| **FAILED** | Timed out or retries exhausted; `error` is in the store. |
+| **CANCELLED** | Client cancelled it while it was still `QUEUED`. |
 
 ---
 
-## 3. Live demo — prove it works
-
-No copying task IDs. Prefer the script; use the one-liners only if you want to click through by hand.
-
-### Recommended: one script
+## Live demo — one case at a time
 
 ```bash
-export BASE=http://152.42.157.49   # or http://localhost:8000
-./ops/scripts/demo-api.sh          # health → happy → cancel → errors → 429
+export BASE=http://152.42.157.49
+# Local fallback:  export BASE=http://localhost:8000
 ```
 
-Step through while talking:
+Run **one scenario per command**. Each is narrated; short pauses between beats  
+(`DEMO_PAUSE=enter` if you want to hit Enter yourself).
+
+---
+
+### Case 1 — Health
+
+**Show:** LB + app are up.
 
 ```bash
 ./ops/scripts/demo-api.sh health
-./ops/scripts/demo-api.sh happy
-./ops/scripts/demo-api.sh cancel
-./ops/scripts/demo-api.sh errors
-./ops/scripts/demo-api.sh backpressure   # needs Docker; uses a tiny local container
 ```
 
-| Scenario | What you should see |
-| :--- | :--- |
-| `health` | `status: HEALTHY`, queue/worker metrics |
-| `happy` | submit JSON, then auto-poll to `COMPLETED` + `result` |
-| `cancel` | `CANCELLED` (or `409` if already running — both valid) |
-| `errors` | status lines `404`, `400`, `400`, `409` |
-| `backpressure` | counts of `202` + `429`, sample 429 body |
+**Expect:** `status: HEALTHY`, `queue_capacity`, `total_workers`.
 
 ---
 
-### Optional: short manual one-liners
+### Case 2 — Happy path
 
-Each command stands alone — no `TASK_ID=` paste.
-
-**Health**
+**Show:** Submit returns immediately; workers finish later.
 
 ```bash
-curl -sS "$BASE/v1/health" | python3 -m json.tool
+./ops/scripts/demo-api.sh happy
 ```
 
-**Submit + wait for result** (captures id for you)
+**Expect:**
+1. `HTTP 202` + `task_id` + `status: QUEUED`
+2. Poll: `QUEUED` → `RUNNING` → `COMPLETED` with a `result`
+
+---
+
+### Case 3 — Cancel
+
+**Show:** Only a still-queued task can be cancelled.
 
 ```bash
-curl -sS -X POST "$BASE/v1/tasks" \
-  -H 'content-type: application/json' \
-  -d '{"task_type":"DATA_AGGREGATION","payload":{"dataset_id":"demo-1","operations":["FILTER"],"destination":"s3://out/r.csv"}}' \
-| tee /dev/stderr \
-| python3 -c "
-import sys, json, time, urllib.request, os
-base = os.environ['BASE']
-tid = json.load(sys.stdin)['task_id']
-for _ in range(50):
-    t = json.load(urllib.request.urlopen(f'{base}/v1/tasks/{tid}'))
-    if t['status'] in ('COMPLETED', 'FAILED', 'CANCELLED'):
-        print(json.dumps(t, indent=2)); break
-    time.sleep(0.1)
-"
+./ops/scripts/demo-api.sh cancel
 ```
 
-**Errors in one shot** (only HTTP codes)
+**Expect:** `HTTP 200` + `CANCELLED`, **or** `HTTP 409` if a worker already claimed it (both valid).
+
+---
+
+### Case 4 — Errors
+
+**Show:** Bad requests fail with the right status codes.
 
 ```bash
-curl -sS -o /dev/null -w "unknown  → %{http_code}\n" "$BASE/v1/tasks/does-not-exist"
-curl -sS -o /dev/null -w "bad body → %{http_code}\n" -X POST "$BASE/v1/tasks" \
-  -H 'content-type: application/json' -d '{"payload":{}}'
-curl -sS -o /dev/null -w "bad type → %{http_code}\n" -X POST "$BASE/v1/tasks" \
-  -H 'content-type: application/json' -d '{"task_type":"NOPE","payload":{}}'
+./ops/scripts/demo-api.sh errors
 ```
 
-**Backpressure** — use the script (it spins a capacity=5 container, bursts 40 submits, prints counts, cleans up):
+**Expect:**
+| Call | Code |
+| :--- | :--- |
+| Unknown task id | `404` |
+| Missing `task_type` | `400` |
+| Unknown `task_type` | `400` |
+| Cancel a finished task | `409` |
+
+---
+
+### Case 5 — Backpressure
+
+**Show:** `202` while the queue has room, then `429` when full.  
+Uses a **local** throwaway container (`QUEUE_CAPACITY=3`, `NUM_WORKERS=1`). Needs Docker.
 
 ```bash
 ./ops/scripts/demo-api.sh backpressure
 ```
 
----
+**Expect (per-request log):**
+1. **Phase A** — `HTTP 202` as the queue fills (`queue=0/3` → `3/3`)
+2. **Phase B** — first `HTTP 429 Too Many Requests` ← backpressure
+3. **Phase C** (optional) — `202` again only if a worker frees a slot
 
-## 4. Demo checklist (talking points)
-
-| Step | Show | What it proves |
-| :--- | :--- | :--- |
-| Topology diagram | LB → FW → Droplet → container | Public path and single-replica constraint |
-| App diagram | API → queue → workers → store | Async submit, in-memory design |
-| `demo-api.sh health` | `HEALTHY` via LB | Infra + app wired |
-| `demo-api.sh happy` | `COMPLETED` + result | End-to-end path |
-| `demo-api.sh cancel` | `CANCELLED` / `409` | State machine |
-| `demo-api.sh errors` | `404` / `400` / `409` | Error contracts |
-| `demo-api.sh backpressure` | `429` counts | Bounded queue |
-| Optional: `docker stop` / redeploy | Drain within grace | Graceful shutdown |
+Also prints the full sequence, e.g. `202 202 202 429 202 429 …`, plus a sample 429 body.
 
 ---
 
-## 5. Quick local full stack (optional)
+## Presenter checklist
 
-```bash
-docker compose up --build -d
-export BASE=http://localhost:8000
-./ops/scripts/demo-api.sh
-docker compose down
-```
+| Order | Command | Talking point |
+| :---: | :--- | :--- |
+| 1 | Topology diagram | LB → firewall → Droplet → one container |
+| 2 | Design diagrams | API → queue → workers → store |
+| 3 | `… health` | Public path is live |
+| 4 | `… happy` | Async job: 202 then COMPLETED |
+| 5 | `… cancel` | State machine |
+| 6 | `… errors` | 404 / 400 / 409 |
+| 7 | `… backpressure` | 202 then 429 — bounded queue |
