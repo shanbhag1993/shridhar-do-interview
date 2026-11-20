@@ -145,8 +145,12 @@ ops/
 **Implemented:** SSH + Docker Compose via `ops/app/deploy.sh` (Ansible deferred — not required for v1).  
 Terraform remains Part 1 only.
 
+**Version convention:** “deploy **v0.1.0**” means image tag **`release-v0.1.0`**  
+(`registry.digitalocean.com/shridhar-job-queue/job-queue:release-v0.1.0`).
+
 ```bash
 export DIGITALOCEAN_TOKEN=...
+VERSION=v0.1.0 ops/app/deploy.sh  # → release-v0.1.0
 ops/app/deploy.sh                 # TAG=latest
-TAG=<sha> ops/app/deploy.sh       # pin immutable tag
+TAG=<sha> ops/app/deploy.sh       # pin git SHA tag
 ```

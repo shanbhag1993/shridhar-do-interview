@@ -26,9 +26,10 @@ curl -sS http://152.42.157.49/v1/health
 
 | Item | Value |
 | :--- | :--- |
-| Image | `registry.digitalocean.com/shridhar-job-queue/job-queue:latest` |
+| Image | `registry.digitalocean.com/shridhar-job-queue/job-queue:release-v0.1.0` |
 | Host path | `/opt/job-queue` (Compose) |
-| Deploy | `ops/app/deploy.sh` |
+| Deploy | `TAG=release-v0.1.0 ops/app/deploy.sh` |
+| Branch | `release-v0.1.0` @ `5f9cf0f` |
 | Status | Running — LB health + smoke task OK (2026-11-20) |
 
 Console: https://cloud.digitalocean.com/droplets/621576394

@@ -3,15 +3,21 @@
 #
 # Usage:
 #   export DIGITALOCEAN_TOKEN=...   # registry pull (or rely on ~/.zshrc)
-#   ops/app/deploy.sh               # TAG=latest
-#   TAG=986ff28 ops/app/deploy.sh
+#   ops/app/deploy.sh                 # TAG=latest
+#   VERSION=v0.1.0 ops/app/deploy.sh  # → image tag release-v0.1.0
+#   TAG=release-v0.1.0 ops/app/deploy.sh
+#
+# Version convention:
+#   Spoken "deploy v0.1.0"  →  registry .../job-queue:release-v0.1.0
+#   VERSION=vX.Y.Z (or X.Y.Z) is normalized to TAG=release-vX.Y.Z
 #
 # Env overrides:
 #   DROPLET_HOST   default 168.144.210.142
 #   DROPLET_USER   default root
 #   LB_URL         default http://152.42.157.49
 #   REMOTE_DIR     default /opt/job-queue
-#   TAG            image tag (default latest)
+#   VERSION        release version (e.g. v0.1.0) — preferred shorthand
+#   TAG            raw image tag (default latest if VERSION unset)
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +26,30 @@ DROPLET_HOST="${DROPLET_HOST:-168.144.210.142}"
 DROPLET_USER="${DROPLET_USER:-root}"
 LB_URL="${LB_URL:-http://152.42.157.49}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/job-queue}"
-TAG="${TAG:-latest}"
+
+# Map VERSION / short tags onto release-* image tags.
+resolve_tag() {
+  local raw="${1:-}"
+  if [ -z "$raw" ]; then
+    echo "latest"
+    return
+  fi
+  case "$raw" in
+    latest|release-*) echo "$raw" ;;
+    v*) echo "release-${raw}" ;;
+    [0-9]*) echo "release-v${raw}" ;;
+    *) echo "$raw" ;;
+  esac
+}
+
+if [ -n "${VERSION:-}" ]; then
+  TAG="$(resolve_tag "$VERSION")"
+elif [ -n "${TAG:-}" ]; then
+  TAG="$(resolve_tag "$TAG")"
+else
+  TAG="latest"
+fi
+
 REGISTRY_HOST="registry.digitalocean.com"
 IMAGE="${REGISTRY_HOST}/shridhar-job-queue/job-queue:${TAG}"
 
